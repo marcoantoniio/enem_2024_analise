@@ -25,7 +25,7 @@ def get_engine():
 @st.cache_data
 def load_data():
     engine = get_engine()
-    df = pd.read_sql("SELECT q021 FROM public.ed_enem_2024_participantes limit 50", engine)
+    df = pd.read_sql("SELECT q021 FROM public.ed_enem_2024_participantes", engine)
     return df
 
 df = load_data()
