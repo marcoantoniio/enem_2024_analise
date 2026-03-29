@@ -28,7 +28,7 @@ if 'total_participantes' not in st.session_state:
 if 'cache_amostras' not in st.session_state:
     st.session_state.cache_amostras = {}
 
-st.sidebar.image("logo_enem.png", width=150)
+st.sidebar.image("logo_enem.png", width=350)
 st.sidebar.title("Configuração de Dados")
 st.sidebar.markdown("Altere a base de dados para recalcular todo o painel automaticamente.")
 
