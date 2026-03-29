@@ -8,9 +8,7 @@ import random
 from sqlalchemy import create_engine, text
 from scipy.stats import shapiro, norm
 
-
 st.set_page_config(page_title="Dashboard ENEM - Amostragem", layout="wide")
-
 
 @st.cache_resource
 def get_engine():
@@ -22,13 +20,15 @@ def get_engine():
 
 engine = get_engine()
 
-
 if 'total_participantes' not in st.session_state:
     with engine.connect() as conn:
         st.session_state.total_participantes = conn.execute(text("SELECT COUNT(*) FROM public.ed_enem_2024_participantes")).scalar()
         st.session_state.total_resultados = conn.execute(text("SELECT COUNT(*) FROM public.ed_enem_2024_resultados")).scalar()
 
-st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/thumb/a/ab/Logo_Enem.svg/1200px-Logo_Enem.svg.png", width=150)
+if 'cache_amostras' not in st.session_state:
+    st.session_state.cache_amostras = {}
+
+st.sidebar.image("http://googleusercontent.com/image_collection/image_retrieval/13967356121772177598", width=150)
 st.sidebar.title("Configuração de Dados")
 st.sidebar.markdown("Altere a base de dados para recalcular todo o painel automaticamente.")
 
@@ -48,55 +48,56 @@ st.sidebar.write(f"**Nível de Confiança:** 95%\n\n**Margem de Erro:** 1%\n\n**
 
 if "População" in fonte_dados:
     st.session_state.last_extracted_fonte = None 
-elif fonte_dados != st.session_state.get('last_extracted_fonte'):
+elif fonte_dados not in st.session_state.cache_amostras:
     with st.spinner(f"Extraindo {fonte_dados} (tamanho = {n_amostra})"):
         total_p = st.session_state.total_participantes
         total_r = st.session_state.total_resultados
         
         if fonte_dados == "Amostra Aleatória Simples":
-
-            q_p = f"SELECT * FROM public.ed_enem_2024_participantes TABLESAMPLE BERNOULLI(2) ORDER BY RANDOM() LIMIT {n_amostra}"
-            q_r = f"SELECT * FROM public.ed_enem_2024_resultados TABLESAMPLE BERNOULLI(2) ORDER BY RANDOM() LIMIT {n_amostra}"
+            q_p = f"SELECT * FROM public.ed_enem_2024_participantes TABLESAMPLE SYSTEM(5) LIMIT {n_amostra}"
+            q_r = f"SELECT * FROM public.ed_enem_2024_resultados TABLESAMPLE SYSTEM(5) LIMIT {n_amostra}"
             
         elif fonte_dados == "Amostra Sistemática":
-
             k_p = total_p // n_amostra
             start_p = random.randint(1, k_p)
-            q_p = f"SELECT * FROM (SELECT *, ROW_NUMBER() OVER(ORDER BY nu_inscricao) as rn FROM public.ed_enem_2024_participantes) t WHERE rn % {k_p} = {start_p % k_p}"
+            q_p = f"SELECT * FROM public.ed_enem_2024_participantes WHERE CAST(nu_inscricao AS BIGINT) % {k_p} = {start_p} LIMIT {n_amostra}"
+            
             k_r = total_r // n_amostra
             start_r = random.randint(1, k_r)
-            q_r = f"SELECT * FROM (SELECT *, ROW_NUMBER() OVER(ORDER BY nu_sequencial) as rn FROM public.ed_enem_2024_resultados) t WHERE rn % {k_r} = {start_r % k_r}"
+            q_r = f"SELECT * FROM public.ed_enem_2024_resultados WHERE CAST(nu_sequencial AS BIGINT) % {k_r} = {start_r} LIMIT {n_amostra}"
             
         elif fonte_dados == "Amostra Estratificada":
-
             q_p = f"""
                 WITH amostra_bruta AS (
-                    SELECT * FROM public.ed_enem_2024_participantes TABLESAMPLE BERNOULLI(5)
+                    SELECT * FROM public.ed_enem_2024_participantes TABLESAMPLE SYSTEM(10)
                 ),
                 pop_counts AS (
                     SELECT regiao_nome_prova, COUNT(*) as total_estrato
-                    FROM public.ed_enem_2024_participantes WHERE regiao_nome_prova IS NOT NULL GROUP BY regiao_nome_prova
+                    FROM amostra_bruta WHERE regiao_nome_prova IS NOT NULL GROUP BY regiao_nome_prova
                 ),
                 ranked AS (
-                    SELECT p.*, ROW_NUMBER() OVER(PARTITION BY p.regiao_nome_prova ORDER BY RANDOM()) as rn, c.total_estrato
+                    SELECT p.*, ROW_NUMBER() OVER(PARTITION BY p.regiao_nome_prova) as rn, c.total_estrato
                     FROM amostra_bruta p JOIN pop_counts c ON p.regiao_nome_prova = c.regiao_nome_prova
                     WHERE p.regiao_nome_prova IS NOT NULL
                 )
-                SELECT * FROM ranked WHERE rn <= ROUND({n_amostra} * (total_estrato::numeric / {total_p}))
+                SELECT * FROM ranked WHERE rn <= ROUND({n_amostra} * (total_estrato::numeric / (SELECT COUNT(*) FROM amostra_bruta)))
             """
-            q_r = f"SELECT * FROM public.ed_enem_2024_resultados TABLESAMPLE BERNOULLI(2) ORDER BY RANDOM() LIMIT {n_amostra}"
+            q_r = f"SELECT * FROM public.ed_enem_2024_resultados TABLESAMPLE SYSTEM(5) LIMIT {n_amostra}"
 
         with engine.connect() as conn:
-            st.session_state.df_participantes_amostra = pd.read_sql(text(q_p), conn)
-            st.session_state.df_resultados_amostra = pd.read_sql(text(q_r), conn)
-        
-        st.session_state.last_extracted_fonte = fonte_dados
+            df_p = pd.read_sql(text(q_p), conn)
+            df_r = pd.read_sql(text(q_r), conn)
+            
+            st.session_state.cache_amostras[fonte_dados] = {'participantes': df_p, 'resultados': df_r}
+
+if "População" not in fonte_dados:
+    st.session_state.df_participantes_amostra = st.session_state.cache_amostras[fonte_dados]['participantes']
+    st.session_state.df_resultados_amostra = st.session_state.cache_amostras[fonte_dados]['resultados']
+    st.session_state.last_extracted_fonte = fonte_dados
 
 st.title(f"📊 Indicadores Principais - {fonte_dados}")
 
-# =========================
-# FUNÇÕES DE BUSCA HÍBRIDA (SQL para População / Pandas para Amostra)
-# =========================
+
 @st.cache_data(show_spinner="Buscando opções...")
 def get_filter_options():
     with engine.connect() as conn:
@@ -120,9 +121,9 @@ def get_dashboard_data(column_name, racas_selecionadas=(), regioes_selecionadas=
     if "População" in fonte:
         where_clauses = ["1=1"]
         where_clauses.append(f"CAST({column_name} AS TEXT) NOT ILIKE '%issing%'")
-        if racas_selecionadas: where_clauses.append(f"tp_cor_raca IN ('{"', '".join(racas_selecionadas)}')")
-        if regioes_selecionadas: where_clauses.append(f"regiao_nome_prova IN ('{"', '".join(regioes_selecionadas)}')")
-        if banheiros_selecionados: where_clauses.append(f"q009 IN ('{"', '".join(banheiros_selecionados)}')")
+        if racas_selecionadas: where_clauses.append(f"tp_cor_raca IN ('{'', ''.join(racas_selecionadas)}')")
+        if regioes_selecionadas: where_clauses.append(f"regiao_nome_prova IN ('{'', ''.join(regioes_selecionadas)}')")
+        if banheiros_selecionados: where_clauses.append(f"q009 IN ('{'', ''.join(banheiros_selecionados)}')")
         query = f"SELECT {column_name} AS categoria, COUNT(*) AS frequencia FROM public.ed_enem_2024_participantes WHERE {column_name} IS NOT NULL AND {' AND '.join(where_clauses)} GROUP BY {column_name};"
         with engine.connect() as conn:
             df = pd.read_sql(text(query), conn)
@@ -143,8 +144,8 @@ def get_dashboard_data(column_name, racas_selecionadas=(), regioes_selecionadas=
 def get_bens_consolidados(racas_selecionadas=(), regioes_selecionadas=(), fonte="População"):
     if "População" in fonte:
         where_clauses = ["1=1"]
-        if racas_selecionadas: where_clauses.append(f"tp_cor_raca IN ('{"', '".join(racas_selecionadas)}')")
-        if regioes_selecionadas: where_clauses.append(f"regiao_nome_prova IN ('{"', '".join(regioes_selecionadas)}')")
+        if racas_selecionadas: where_clauses.append(f"tp_cor_raca IN ('{'', ''.join(racas_selecionadas)}')")
+        if regioes_selecionadas: where_clauses.append(f"regiao_nome_prova IN ('{'', ''.join(regioes_selecionadas)}')")
         query = f"""
             SELECT COUNT(*) as total,
             SUM(CASE WHEN q016 = 'Sim' THEN 1 ELSE 0 END) as micro_sim, SUM(CASE WHEN q016 = 'Não' THEN 1 ELSE 0 END) as micro_nao,
@@ -177,8 +178,8 @@ def get_bens_consolidados(racas_selecionadas=(), regioes_selecionadas=(), fonte=
 def get_escolaridade_pais(racas_selecionadas=(), regioes_selecionadas=(), fonte="População"):
     if "População" in fonte:
         where_clauses = ["1=1"]
-        if racas_selecionadas: where_clauses.append(f"tp_cor_raca IN ('{"', '".join(racas_selecionadas)}')")
-        if regioes_selecionadas: where_clauses.append(f"regiao_nome_prova IN ('{"', '".join(regioes_selecionadas)}')")
+        if racas_selecionadas: where_clauses.append(f"tp_cor_raca IN ('{'', ''.join(racas_selecionadas)}')")
+        if regioes_selecionadas: where_clauses.append(f"regiao_nome_prova IN ('{'', ''.join(regioes_selecionadas)}')")
         query = f"""
             SELECT 'pai' AS responsavel, q001 AS categoria, COUNT(*) AS frequencia FROM public.ed_enem_2024_participantes WHERE q001 IS NOT NULL AND CAST(q001 AS TEXT) NOT ILIKE '%issing%' AND {' AND '.join(where_clauses)} GROUP BY q001
             UNION ALL
@@ -207,7 +208,6 @@ def get_amostra_notas(fonte="População"):
         res.columns = ["C. da Natureza", "Ciências Humanas", "Linguagens", "Matemática", "Redação", "Média Geral"]
         return res
 
-
 def format_kpi_value(val):
     if val == 0: return "0%"
     if val < 5: return f"{val:.1f}%"
@@ -230,7 +230,6 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
 
 racas_opcoes, regioes_opcoes, banheiros_opcoes = get_filter_options()
 
-
 with tab1:
     st.subheader("Indicadores de Nacionalidade")
     df_nac = get_nacionalidade_data(fonte_dados)
@@ -245,7 +244,6 @@ with tab1:
         col1.metric("Estrangeiro(a)", f"{estrangeiro:.2f}%")
         col2.metric("Não informado", f"{nao_inf:.2f}%")
         col3.metric("Outros", f"{outros:.2f}%")
-
 
 with tab2:
     st.write("") 
@@ -308,7 +306,6 @@ with tab2:
             w1.markdown(render_kpi_html((row['wifi_sim'] / total) * 100, "Sim", font_size="60px", label_size="16px"), unsafe_allow_html=True)
             w2.markdown(render_kpi_html((row['wifi_nao'] / total) * 100, "Não", font_size="60px", label_size="16px"), unsafe_allow_html=True)
 
-
 with tab3:
     st.write("")
     st.markdown("##### Filtros Interativos")
@@ -350,7 +347,6 @@ with tab3:
             fig_mae.update_traces(marker_color='#38B2A3', textposition='inside', insidetextanchor='end')
             fig_mae.update_layout(xaxis_title="", yaxis_title="", xaxis=dict(showgrid=True, showticklabels=False), margin=dict(l=10, r=10, t=10, b=10), height=450, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
             st.plotly_chart(fig_mae, use_container_width=True)
-
 
 with tab4:
     st.write("")
@@ -397,7 +393,6 @@ with tab4:
         df_renda_display = df_renda_display.rename(columns={'categoria': 'Renda Familiar'})
         
         st.dataframe(df_renda_display[['Renda Familiar', 'Freq. Absoluta', 'Freq. Abs. Acumulada', 'Freq. Relativa (%)', 'Freq. Rel. Acumulada (%)']], use_container_width=True, hide_index=True)
-
 
 with tab5:
     st.write("")
@@ -458,7 +453,6 @@ with tab6:
             p_formatado_lc = f"{p_lc:.4f}" if p_lc >= 0.0001 else "< 0,0001"
             st.markdown(f"<div style='background-color: rgba(0,0,0,0.03); padding: 15px; border-radius: 8px; text-align: center; border: 1px solid rgba(0,0,0,0.1);'><p style='margin-bottom: 5px; color: #555; font-size: 16px;'><b>Estatística W:</b> {stat_lc:.4f}</p><p style='margin-bottom: 0px; color: #555; font-size: 16px;'><b>Valor-p:</b> {p_formatado_lc}</p></div>", unsafe_allow_html=True)
 
-
 with tab7:
     st.write("")
     st.markdown("##### Filtros Interativos")
@@ -503,7 +497,6 @@ with tab7:
                 df_idade_display['Freq. Rel. Acumulada (%)'] = df_idade_display['Freq. Rel. Acumulada (%)'].apply(lambda x: f"{x:.2f}%")
                 st.dataframe(df_idade_display[['Faixa Etária', 'Freq. Absoluta', 'Freq. Abs. Acumulada', 'Freq. Relativa (%)', 'Freq. Rel. Acumulada (%)']], use_container_width=True, hide_index=True, height=450)
 
-
 with tab8:
     st.write("")
     st.markdown("##### Validação Estatística da Amostra")
@@ -514,14 +507,12 @@ with tab8:
     else:
         st.write(f"Comparativo visual da distribuição de regiões entre a População Original ({st.session_state.total_participantes:,} alunos) e a sua **{fonte_dados}** ({n_amostra} alunos).".replace(',', '.'))
         
-        
         df_pop_reg = get_dashboard_data("regiao_nome_prova", fonte="População")
         total_pop_reg = df_pop_reg['frequencia'].sum()
         df_pop_plot = df_pop_reg[['categoria', 'frequencia']].copy()
         df_pop_plot['Tipo'] = 'Brasil (População Real)'
         df_pop_plot['%'] = (df_pop_plot['frequencia'] / total_pop_reg) * 100
 
-        # Pega a região da amostra selecionada atualmente
         df_amostra_reg = get_dashboard_data("regiao_nome_prova", fonte=fonte_dados)
         total_am_reg = df_amostra_reg['frequencia'].sum()
         df_amostra_plot = df_amostra_reg[['categoria', 'frequencia']].copy()
