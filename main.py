@@ -242,9 +242,9 @@ with tab1:
         outros = df_nac[~df_nac["tp_nacionalidade"].isin(["Estrangeiro(a)", "Não informado"])]["percentual"].sum()
 
         col1, col2, col3 = st.columns(3)
-        col1.metric("Estrangeiro(a)", f"{estrangeiro:.3f}%")
-        col2.metric("Não informado", f"{nao_inf:.3f}%")
-        col3.metric("Outros", f"{outros:.3f}%")
+        col1.metric("Estrangeiro(a)", f"{estrangeiro:.2f}%")
+        col2.metric("Não informado", f"{nao_inf:.2f}%")
+        col3.metric("Outros", f"{outros:.2f}%")
 
 
 with tab2:
