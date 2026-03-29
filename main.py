@@ -121,9 +121,19 @@ def get_dashboard_data(column_name, racas_selecionadas=(), regioes_selecionadas=
     if "População" in fonte:
         where_clauses = ["1=1"]
         where_clauses.append(f"CAST({column_name} AS TEXT) NOT ILIKE '%issing%'")
-        if racas_selecionadas: where_clauses.append(f"tp_cor_raca IN ('{'', ''.join(racas_selecionadas)}')")
-        if regioes_selecionadas: where_clauses.append(f"regiao_nome_prova IN ('{'', ''.join(regioes_selecionadas)}')")
-        if banheiros_selecionados: where_clauses.append(f"q009 IN ('{'', ''.join(banheiros_selecionados)}')")
+        
+        if racas_selecionadas: 
+            racas_str = "', '".join(racas_selecionadas)
+            where_clauses.append(f"tp_cor_raca IN ('{racas_str}')")
+            
+        if regioes_selecionadas: 
+            regioes_str = "', '".join(regioes_selecionadas)
+            where_clauses.append(f"regiao_nome_prova IN ('{regioes_str}')")
+            
+        if banheiros_selecionados: 
+            banheiros_str = "', '".join(banheiros_selecionados)
+            where_clauses.append(f"q009 IN ('{banheiros_str}')")
+            
         query = f"SELECT {column_name} AS categoria, COUNT(*) AS frequencia FROM public.ed_enem_2024_participantes WHERE {column_name} IS NOT NULL AND {' AND '.join(where_clauses)} GROUP BY {column_name};"
         with engine.connect() as conn:
             df = pd.read_sql(text(query), conn)
@@ -144,8 +154,15 @@ def get_dashboard_data(column_name, racas_selecionadas=(), regioes_selecionadas=
 def get_bens_consolidados(racas_selecionadas=(), regioes_selecionadas=(), fonte="População"):
     if "População" in fonte:
         where_clauses = ["1=1"]
-        if racas_selecionadas: where_clauses.append(f"tp_cor_raca IN ('{'', ''.join(racas_selecionadas)}')")
-        if regioes_selecionadas: where_clauses.append(f"regiao_nome_prova IN ('{'', ''.join(regioes_selecionadas)}')")
+        
+        if racas_selecionadas: 
+            racas_str = "', '".join(racas_selecionadas)
+            where_clauses.append(f"tp_cor_raca IN ('{racas_str}')")
+            
+        if regioes_selecionadas: 
+            regioes_str = "', '".join(regioes_selecionadas)
+            where_clauses.append(f"regiao_nome_prova IN ('{regioes_str}')")
+            
         query = f"""
             SELECT COUNT(*) as total,
             SUM(CASE WHEN q016 = 'Sim' THEN 1 ELSE 0 END) as micro_sim, SUM(CASE WHEN q016 = 'Não' THEN 1 ELSE 0 END) as micro_nao,
@@ -178,8 +195,15 @@ def get_bens_consolidados(racas_selecionadas=(), regioes_selecionadas=(), fonte=
 def get_escolaridade_pais(racas_selecionadas=(), regioes_selecionadas=(), fonte="População"):
     if "População" in fonte:
         where_clauses = ["1=1"]
-        if racas_selecionadas: where_clauses.append(f"tp_cor_raca IN ('{'', ''.join(racas_selecionadas)}')")
-        if regioes_selecionadas: where_clauses.append(f"regiao_nome_prova IN ('{'', ''.join(regioes_selecionadas)}')")
+        
+        if racas_selecionadas: 
+            racas_str = "', '".join(racas_selecionadas)
+            where_clauses.append(f"tp_cor_raca IN ('{racas_str}')")
+            
+        if regioes_selecionadas: 
+            regioes_str = "', '".join(regioes_selecionadas)
+            where_clauses.append(f"regiao_nome_prova IN ('{regioes_str}')")
+            
         query = f"""
             SELECT 'pai' AS responsavel, q001 AS categoria, COUNT(*) AS frequencia FROM public.ed_enem_2024_participantes WHERE q001 IS NOT NULL AND CAST(q001 AS TEXT) NOT ILIKE '%issing%' AND {' AND '.join(where_clauses)} GROUP BY q001
             UNION ALL
