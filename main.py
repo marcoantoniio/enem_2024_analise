@@ -43,25 +43,23 @@ fonte_dados = st.sidebar.radio(
 n_amostra = 9604
 
 st.sidebar.divider()
-st.sidebar.markdown("### ℹ️ Dados da Amostra")
-st.sidebar.write(f"**Nível de Confiança:** 95%\n\n**Margem de Erro:** 1%\n\n**Tamanho (n):** {n_amostra:,}".replace(',', '.'))
+st.sidebar.markdown("### Dados da Amostra")
+st.sidebar.write(f"**Nível de Confiança:** 95%\n\n**Margem de Erro:** 1%\n\n**Tamanho:** {n_amostra:,}".replace(',', '.'))
 
-# Lógica de Extração da Amostra Híbrida (AGORA ULTRA-RÁPIDA)
 if "População" in fonte_dados:
     st.session_state.last_extracted_fonte = None 
 elif fonte_dados != st.session_state.get('last_extracted_fonte'):
-    with st.spinner(f"Extraindo {fonte_dados} (n={n_amostra})... Otimizando com TABLESAMPLE."):
+    with st.spinner(f"Extraindo {fonte_dados} (tamanho = {n_amostra})"):
         total_p = st.session_state.total_participantes
         total_r = st.session_state.total_resultados
         
         if fonte_dados == "Amostra Aleatória Simples":
-            # OTIMIZAÇÃO: TABLESAMPLE BERNOULLI(2) pega apenas ~2% da base de forma ultra-rápida e aleatória,
-            # reduzindo o custo do ORDER BY RANDOM() de 4.3 milhões para apenas ~86 mil linhas.
+
             q_p = f"SELECT * FROM public.ed_enem_2024_participantes TABLESAMPLE BERNOULLI(2) ORDER BY RANDOM() LIMIT {n_amostra}"
             q_r = f"SELECT * FROM public.ed_enem_2024_resultados TABLESAMPLE BERNOULLI(2) ORDER BY RANDOM() LIMIT {n_amostra}"
             
         elif fonte_dados == "Amostra Sistemática":
-            # Na sistemática somos obrigados a enfileirar, mas o Postgres fará isso em memória
+
             k_p = total_p // n_amostra
             start_p = random.randint(1, k_p)
             q_p = f"SELECT * FROM (SELECT *, ROW_NUMBER() OVER(ORDER BY nu_inscricao) as rn FROM public.ed_enem_2024_participantes) t WHERE rn % {k_p} = {start_p % k_p}"
@@ -70,8 +68,7 @@ elif fonte_dados != st.session_state.get('last_extracted_fonte'):
             q_r = f"SELECT * FROM (SELECT *, ROW_NUMBER() OVER(ORDER BY nu_sequencial) as rn FROM public.ed_enem_2024_resultados) t WHERE rn % {k_r} = {start_r % k_r}"
             
         elif fonte_dados == "Amostra Estratificada":
-            # OTIMIZAÇÃO: Pegamos uma amostra rápida de 5% da base para realizar a partição estratificada
-            # Isso acelera o processo em mais de 90% sem perder a representatividade regional
+
             q_p = f"""
                 WITH amostra_bruta AS (
                     SELECT * FROM public.ed_enem_2024_participantes TABLESAMPLE BERNOULLI(5)
