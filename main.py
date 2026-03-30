@@ -4,29 +4,48 @@ import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
 import random
+import glob
 from scipy.stats import shapiro, norm
 
 st.set_page_config(page_title="Dashboard ENEM - Amostragem", layout="wide")
 
+# =========================
+# CARREGAMENTO DE DADOS (CACHE EM RAM)
+# =========================
 @st.cache_data(show_spinner="Carregando dados na memória (apenas na 1ª vez)...")
 def carregar_dados_parquet():
-    df_p = pd.read_parquet("dados_enem_participantes.parquet")
-    df_r = pd.read_parquet("dados_enem_resultados.parquet")
+    # O glob pega todos os arquivos que começam com esse nome e terminam em .parquet
+    arquivos_p = sorted(glob.glob("dados_enem_participantes_pt*.parquet"))
+    arquivos_r = sorted(glob.glob("dados_enem_resultados_pt*.parquet"))
     
+    if not arquivos_p or not arquivos_r:
+        st.error("Arquivos de dados não encontrados! Verifique se os parquets estão na pasta.")
+        st.stop()
+        
+    # O Pandas lê a lista de arquivos e junta (concatena) automaticamente
+    df_p = pd.concat([pd.read_parquet(f) for f in arquivos_p], ignore_index=True)
+    df_r = pd.concat([pd.read_parquet(f) for f in arquivos_r], ignore_index=True)
+    
+    # Pré-processamento leve (Participantes)
     cols_to_clean = ['tp_cor_raca', 'regiao_nome_prova', 'q009', 'q001', 'q002', 'q007']
     for col in cols_to_clean:
         if col in df_p.columns:
+            # Ao carregar, converte as categorias de volta para texto para o replace funcionar, depois volta pra categoria
             df_p[col] = df_p[col].astype(str)
             df_p.loc[df_p[col].str.contains('issing', case=False, na=False), col] = np.nan
+            df_p[col] = df_p[col].astype('category') # Re-otimiza
             
     return df_p, df_r
 
+# Executa o carregamento
 df_completo_p, df_completo_r = carregar_dados_parquet()
 total_populacao_p = len(df_completo_p)
 total_populacao_r = len(df_completo_r)
 
-
-st.sidebar.image("logo_enem.png", width=150)
+# =========================
+# CONFIGURAÇÃO DA BARRA LATERAL E AMOSTRAGEM
+# =========================
+st.sidebar.image("logo_enem.png", width=150) # Lembre-se da imagem local
 st.sidebar.title("Configuração de Dados")
 st.sidebar.markdown("Altere a base de dados para recalcular todo o painel automaticamente.")
 
@@ -44,6 +63,7 @@ st.sidebar.divider()
 st.sidebar.markdown("### Dados da Amostra")
 st.sidebar.write(f"**Nível de Confiança:** 95%\n\n**Margem de Erro:** 1%\n\n**Tamanho Alvo:** {n_amostra:,}".replace(',', '.'))
 
+# Gerador de Amostras para as DUAS tabelas
 @st.cache_data(show_spinner=False)
 def gerar_amostra(df_p_base, df_r_base, tipo_amostra, tamanho):
     if "População" in tipo_amostra:
@@ -64,6 +84,7 @@ def gerar_amostra(df_p_base, df_r_base, tipo_amostra, tamanho):
         return amostra_p, amostra_r
         
     elif tipo_amostra == "Amostra Estratificada":
+        # Estratifica os Participantes
         proporcoes = df_p_base['regiao_nome_prova'].dropna().value_counts(normalize=True)
         def amostrar_estrato(group):
             nome_regiao = group.name
@@ -75,14 +96,20 @@ def gerar_amostra(df_p_base, df_r_base, tipo_amostra, tamanho):
             
         df_estratificado_p = df_p_base.groupby('regiao_nome_prova', group_keys=False).apply(amostrar_estrato)
         
+        # O código original aplicava amostra aleatória aos Resultados durante a Estratificada
         df_aleatorio_r = df_r_base.sample(n=tamanho, random_state=42)
         
         return df_estratificado_p, df_aleatorio_r
 
+# Gera as duas amostras ativas
 df_ativo_p, df_ativo_r = gerar_amostra(df_completo_p, df_completo_r, fonte_dados, n_amostra)
 
 st.title(f"📊 Indicadores Principais - {fonte_dados}")
 
+
+# =========================
+# FUNÇÕES DE FILTRAGEM E CÁLCULO
+# =========================
 @st.cache_data(show_spinner=False)
 def get_filter_options():
     racas = sorted([x for x in df_completo_p['tp_cor_raca'].dropna().unique() if str(x).lower() != 'nan'])
@@ -138,6 +165,7 @@ def get_escolaridade_pais(df_entrada, racas_selecionadas=(), regioes_selecionada
     
     return pd.concat([pai, mae], ignore_index=True)
 
+# Funções visuais de UI
 def format_kpi_value(val):
     if val == 0: return "0%"
     if val < 5: return f"{val:.1f}%"
@@ -152,6 +180,9 @@ def render_kpi_html(valor, label, font_size="35px", label_size="14px"):
     return f"<div style='text-align: center; background-color: transparent;'><div style='color: #268C82; font-size: {font_size}; font-weight: bold; line-height: 1.1;'>{format_kpi_value(valor)}</div><div style='color: #888; font-size: {label_size};'>{label}</div></div>"
 
 
+# =========================
+# INTERFACE DO USUÁRIO (TABS)
+# =========================
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "Nacionalidade", "Dashboard (Cor, Região, Bens)", "Escolaridade Pais",
     "Banheiros e Renda", "Distribuição de Notas", "Normalidade (Shapiro-Wilk)",
@@ -337,6 +368,7 @@ with tab5:
         'nota_media_5_notas': 'Média Geral'
     }
     
+    # Usa a amostra ativa de Resultados (Tab 5 e 6 rodam exclusivamente na base de resultados)
     df_plot = df_ativo_r.copy()
     if len(df_plot) > 30000:
         df_plot = df_plot.sample(n=30000, random_state=42)
@@ -456,12 +488,14 @@ with tab8:
     else:
         st.write(f"Comparativo visual da distribuição de regiões entre a População Original ({total_populacao_p:,} alunos) e a sua **{fonte_dados}** ({len(df_ativo_p)} alunos).".replace(',', '.'))
         
+        # Pega do dataset original 100%
         df_pop_reg = get_dashboard_data(df_completo_p, "regiao_nome_prova")
         total_pop_reg = df_pop_reg['frequencia'].sum()
         df_pop_plot = df_pop_reg[['categoria', 'frequencia']].copy()
         df_pop_plot['Tipo'] = 'Brasil (População Real)'
         df_pop_plot['%'] = (df_pop_plot['frequencia'] / total_pop_reg) * 100
 
+        # Pega da amostra ativa
         df_amostra_reg = get_dashboard_data(df_ativo_p, "regiao_nome_prova")
         total_am_reg = df_amostra_reg['frequencia'].sum()
         df_amostra_plot = df_amostra_reg[['categoria', 'frequencia']].copy()
