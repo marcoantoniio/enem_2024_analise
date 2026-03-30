@@ -78,11 +78,14 @@ def gerar_amostra(tipo_amostra, tamanho):
                 regiao = row['regiao_nome_prova']
                 n_estrato = int(round((row['qtd'] / total_validos) * tamanho))
                 if n_estrato > 0:
-                    q = f"SELECT * FROM {FILE_P} WHERE regiao_nome_prova = '{regiao}' USING SAMPLE reservoir({n_estrato} ROWS)"
+                    q = f"SELECT * FROM (SELECT * FROM {FILE_P} WHERE regiao_nome_prova = '{regiao}') USING SAMPLE reservoir({n_estrato} ROWS)"
                     dfs_p.append(duckdb.query(q).df())
                     
             df_p = pd.concat(dfs_p, ignore_index=True)
-            df_r = duckdb.query(f"SELECT * FROM {FILE_R} USING SAMPLE reservoir({tamanho} ROWS)").df()
+            
+            # Garantir que a base de resultados puxe exatamente a mesma quantidade gerada na estratificada
+            tamanho_real = len(df_p)
+            df_r = duckdb.query(f"SELECT * FROM {FILE_R} USING SAMPLE reservoir({tamanho_real} ROWS)").df()
             return df_p, df_r
 
 df_ativo_p, df_ativo_r = gerar_amostra(fonte_dados, n_amostra)
