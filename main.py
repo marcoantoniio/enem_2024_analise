@@ -9,13 +9,9 @@ from scipy.stats import shapiro, norm
 
 st.set_page_config(page_title="Dashboard ENEM - Amostragem", layout="wide")
 
-# Nomes dos arquivos (o asterisco faz o DuckDB ler todos os pedaços de uma vez)
 FILE_P = "'dados_enem_participantes_pt*.parquet'"
 FILE_R = "'dados_enem_resultados_pt*.parquet'"
 
-# =========================
-# CONFIGURAÇÃO DA BARRA LATERAL E AMOSTRAGEM
-# =========================
 st.sidebar.image("logo_enem.png", width=150)
 st.sidebar.title("Configuração de Dados")
 st.sidebar.markdown("Altere a base de dados para recalcular todo o painel automaticamente.")
@@ -43,17 +39,14 @@ def get_totais():
 
 total_populacao_p, total_populacao_r = get_totais()
 
-# =========================
-# GERADOR DE AMOSTRAS (DuckDB SQL para baixar só 9600 linhas pra RAM)
-# =========================
+
 @st.cache_data(show_spinner=False)
 def gerar_amostra(tipo_amostra, tamanho):
     if "População" in tipo_amostra:
-        return None, None # Retorna nulo porque a população será lida direto do disco
+        return None, None 
     
     with st.spinner(f"Gerando {tipo_amostra}..."):
         if tipo_amostra == "Amostra Aleatória Simples":
-            # Usamos reservoir sampling nativo do DuckDB
             df_p = duckdb.query(f"SELECT * FROM {FILE_P} USING SAMPLE reservoir({tamanho} ROWS)").df()
             df_r = duckdb.query(f"SELECT * FROM {FILE_R} USING SAMPLE reservoir({tamanho} ROWS)").df()
             return df_p, df_r
@@ -89,8 +82,6 @@ def gerar_amostra(tipo_amostra, tamanho):
 
 df_ativo_p, df_ativo_r = gerar_amostra(fonte_dados, n_amostra)
 
-# Define as fontes de onde as queries vão ler os dados
-# O DuckDB é mágico: ele consegue ler direto do arquivo (FILE_P) ou direto da variável do Pandas (df_ativo_p)!
 SOURCE_P = FILE_P if "População" in fonte_dados else "df_ativo_p"
 SOURCE_R = FILE_R if "População" in fonte_dados else "df_ativo_r"
 
@@ -100,6 +91,13 @@ st.title(f"📊 Indicadores Principais - {fonte_dados}")
 # =========================
 # FUNÇÕES DE FILTRAGEM E CÁLCULO (Agora em SQL super rápido pelo DuckDB)
 # =========================
+
+# ---> FUNÇÃO NOVA BLINDADA <---
+def formatar_para_sql(valores):
+    """Garante que a lista do Streamlit vire uma string perfeita para o SQL: 'A', 'B'"""
+    return ", ".join([f"'{v}'" for v in valores])
+
+
 @st.cache_data(show_spinner=False)
 def get_filter_options():
     racas = duckdb.query(f"SELECT DISTINCT tp_cor_raca FROM {FILE_P} WHERE tp_cor_raca IS NOT NULL AND CAST(tp_cor_raca AS VARCHAR) NOT ILIKE '%issing%'").df()['tp_cor_raca'].tolist()
@@ -110,18 +108,13 @@ def get_filter_options():
 def get_dashboard_data(column_name, racas_selecionadas=(), regioes_selecionadas=(), banheiros_selecionados=()):
     where_clauses = ["1=1", f"{column_name} IS NOT NULL", f"CAST({column_name} AS VARCHAR) NOT ILIKE '%issing%'"]
     
-    # CORREÇÃO AQUI: Formatação segura das strings
+    # Usando a função blindada (sem aspas por fora das chaves!)
     if racas_selecionadas: 
-        racas_str = "', '".join(racas_selecionadas)
-        where_clauses.append(f"tp_cor_raca IN ('{racas_str}')")
-        
+        where_clauses.append(f"tp_cor_raca IN ({formatar_para_sql(racas_selecionadas)})")
     if regioes_selecionadas: 
-        regioes_str = "', '".join(regioes_selecionadas)
-        where_clauses.append(f"regiao_nome_prova IN ('{regioes_str}')")
-        
+        where_clauses.append(f"regiao_nome_prova IN ({formatar_para_sql(regioes_selecionadas)})")
     if banheiros_selecionados: 
-        banheiros_str = "', '".join(banheiros_selecionados)
-        where_clauses.append(f"q009 IN ('{banheiros_str}')")
+        where_clauses.append(f"q009 IN ({formatar_para_sql(banheiros_selecionados)})")
         
     query = f"SELECT {column_name} AS categoria, COUNT(*) AS frequencia FROM {SOURCE_P} WHERE {' AND '.join(where_clauses)} GROUP BY {column_name};"
     df = duckdb.query(query).df()
@@ -133,14 +126,10 @@ def get_dashboard_data(column_name, racas_selecionadas=(), regioes_selecionadas=
 def get_bens_consolidados(racas_selecionadas=(), regioes_selecionadas=()):
     where_clauses = ["1=1"]
     
-    # CORREÇÃO AQUI
     if racas_selecionadas: 
-        racas_str = "', '".join(racas_selecionadas)
-        where_clauses.append(f"tp_cor_raca IN ('{racas_str}')")
-        
+        where_clauses.append(f"tp_cor_raca IN ({formatar_para_sql(racas_selecionadas)})")
     if regioes_selecionadas: 
-        regioes_str = "', '".join(regioes_selecionadas)
-        where_clauses.append(f"regiao_nome_prova IN ('{regioes_str}')")
+        where_clauses.append(f"regiao_nome_prova IN ({formatar_para_sql(regioes_selecionadas)})")
         
     query = f"""
         SELECT COUNT(*) as total,
@@ -158,19 +147,24 @@ def get_bens_consolidados(racas_selecionadas=(), regioes_selecionadas=()):
 def get_escolaridade_pais(racas_selecionadas=(), regioes_selecionadas=()):
     where_clauses = ["1=1"]
     
-    # CORREÇÃO AQUI
     if racas_selecionadas: 
-        racas_str = "', '".join(racas_selecionadas)
-        where_clauses.append(f"tp_cor_raca IN ('{racas_str}')")
-        
+        where_clauses.append(f"tp_cor_raca IN ({formatar_para_sql(racas_selecionadas)})")
     if regioes_selecionadas: 
-        regioes_str = "', '".join(regioes_selecionadas)
-        where_clauses.append(f"regiao_nome_prova IN ('{regioes_str}')")
+        where_clauses.append(f"regiao_nome_prova IN ({formatar_para_sql(regioes_selecionadas)})")
         
     query = f"""
         SELECT 'pai' AS responsavel, q001 AS categoria, COUNT(*) AS frequencia FROM {SOURCE_P} WHERE q001 IS NOT NULL AND CAST(q001 AS VARCHAR) NOT ILIKE '%issing%' AND {' AND '.join(where_clauses)} GROUP BY q001
         UNION ALL
         SELECT 'mae' AS responsavel, q002 AS categoria, COUNT(*) AS frequencia FROM {SOURCE_P} WHERE q002 IS NOT NULL AND CAST(q002 AS VARCHAR) NOT ILIKE '%issing%' AND {' AND '.join(where_clauses)} GROUP BY q002;
+    """
+    return duckdb.query(query).df()
+
+def get_amostra_notas():
+    query = f"""
+        SELECT nota_cn_ciencias_da_natureza AS "C. da Natureza", nota_ch_ciencias_humanas AS "Ciências Humanas", 
+        nota_lc_linguagens_e_codigos AS "Linguagens", nota_mt_matematica AS "Matemática", 
+        nota_redacao AS "Redação", nota_media_5_notas AS "Média Geral" 
+        FROM {SOURCE_R} LIMIT 30000;
     """
     return duckdb.query(query).df()
 
@@ -189,7 +183,6 @@ def get_escolaridade_pais(racas_selecionadas=(), regioes_selecionadas=()):
     return duckdb.query(query).df()
 
 def get_amostra_notas():
-    # Pega só até 30 mil notas pro Plotly não travar
     query = f"""
         SELECT nota_cn_ciencias_da_natureza AS "C. da Natureza", nota_ch_ciencias_humanas AS "Ciências Humanas", 
         nota_lc_linguagens_e_codigos AS "Linguagens", nota_mt_matematica AS "Matemática", 
@@ -199,7 +192,6 @@ def get_amostra_notas():
     return duckdb.query(query).df()
 
 
-# Funções visuais de UI
 def format_kpi_value(val):
     if val == 0: return "0%"
     if val < 5: return f"{val:.1f}%"
@@ -214,9 +206,6 @@ def render_kpi_html(valor, label, font_size="35px", label_size="14px"):
     return f"<div style='text-align: center; background-color: transparent;'><div style='color: #268C82; font-size: {font_size}; font-weight: bold; line-height: 1.1;'>{format_kpi_value(valor)}</div><div style='color: #888; font-size: {label_size};'>{label}</div></div>"
 
 
-# =========================
-# INTERFACE DO USUÁRIO (TABS)
-# =========================
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "Nacionalidade", "Dashboard (Cor, Região, Bens)", "Escolaridade Pais",
     "Banheiros e Renda", "Distribuição de Notas", "Normalidade (Shapiro-Wilk)",
