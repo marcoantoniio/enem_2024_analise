@@ -3,32 +3,30 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
-import math
 import random
-from sqlalchemy import create_engine, text
 from scipy.stats import shapiro, norm
 
 st.set_page_config(page_title="Dashboard ENEM - Amostragem", layout="wide")
 
-@st.cache_resource
-def get_engine():
-    db_config = st.secrets["database"]
-    return create_engine(
-        f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}"
-        f"@{db_config['host']}:{db_config['port']}/{db_config['database']}"
-    )
+@st.cache_data(show_spinner="Carregando dados na memória (apenas na 1ª vez)...")
+def carregar_dados_parquet():
+    df_p = pd.read_parquet("dados_enem_participantes.parquet")
+    df_r = pd.read_parquet("dados_enem_resultados.parquet")
+    
+    cols_to_clean = ['tp_cor_raca', 'regiao_nome_prova', 'q009', 'q001', 'q002', 'q007']
+    for col in cols_to_clean:
+        if col in df_p.columns:
+            df_p[col] = df_p[col].astype(str)
+            df_p.loc[df_p[col].str.contains('issing', case=False, na=False), col] = np.nan
+            
+    return df_p, df_r
 
-engine = get_engine()
+df_completo_p, df_completo_r = carregar_dados_parquet()
+total_populacao_p = len(df_completo_p)
+total_populacao_r = len(df_completo_r)
 
-if 'total_participantes' not in st.session_state:
-    with engine.connect() as conn:
-        st.session_state.total_participantes = conn.execute(text("SELECT COUNT(*) FROM public.ed_enem_2024_participantes")).scalar()
-        st.session_state.total_resultados = conn.execute(text("SELECT COUNT(*) FROM public.ed_enem_2024_resultados")).scalar()
 
-if 'cache_amostras' not in st.session_state:
-    st.session_state.cache_amostras = {}
-
-st.sidebar.image("logo_enem.png", width=350)
+st.sidebar.image("logo_enem.png", width=150)
 st.sidebar.title("Configuração de Dados")
 st.sidebar.markdown("Altere a base de dados para recalcular todo o painel automaticamente.")
 
@@ -44,193 +42,101 @@ n_amostra = 9604
 
 st.sidebar.divider()
 st.sidebar.markdown("### Dados da Amostra")
-st.sidebar.write(f"**Nível de Confiança:** 95%\n\n**Margem de Erro:** 1%\n\n**Tamanho:** {n_amostra:,}".replace(',', '.'))
+st.sidebar.write(f"**Nível de Confiança:** 95%\n\n**Margem de Erro:** 1%\n\n**Tamanho Alvo:** {n_amostra:,}".replace(',', '.'))
 
-if "População" in fonte_dados:
-    st.session_state.last_extracted_fonte = None 
-elif fonte_dados not in st.session_state.cache_amostras:
-    with st.spinner(f"Extraindo {fonte_dados} (tamanho = {n_amostra})"):
-        total_p = st.session_state.total_participantes
-        total_r = st.session_state.total_resultados
+@st.cache_data(show_spinner=False)
+def gerar_amostra(df_p_base, df_r_base, tipo_amostra, tamanho):
+    if "População" in tipo_amostra:
+        return df_p_base, df_r_base
+    
+    elif tipo_amostra == "Amostra Aleatória Simples":
+        return df_p_base.sample(n=tamanho, random_state=42), df_r_base.sample(n=tamanho, random_state=42)
         
-        if fonte_dados == "Amostra Aleatória Simples":
-            q_p = f"SELECT * FROM public.ed_enem_2024_participantes TABLESAMPLE SYSTEM(5) LIMIT {n_amostra}"
-            q_r = f"SELECT * FROM public.ed_enem_2024_resultados TABLESAMPLE SYSTEM(5) LIMIT {n_amostra}"
+    elif tipo_amostra == "Amostra Sistemática":
+        k_p = len(df_p_base) // tamanho
+        start_p = random.randint(0, k_p - 1)
+        amostra_p = df_p_base.iloc[start_p::k_p].head(tamanho)
+        
+        k_r = len(df_r_base) // tamanho
+        start_r = random.randint(0, k_r - 1)
+        amostra_r = df_r_base.iloc[start_r::k_r].head(tamanho)
+        
+        return amostra_p, amostra_r
+        
+    elif tipo_amostra == "Amostra Estratificada":
+        proporcoes = df_p_base['regiao_nome_prova'].dropna().value_counts(normalize=True)
+        def amostrar_estrato(group):
+            nome_regiao = group.name
+            if nome_regiao in proporcoes:
+                n_tamanho = int(np.round(proporcoes[nome_regiao] * tamanho))
+                n_tamanho = min(n_tamanho, len(group)) 
+                return group.sample(n=n_tamanho, random_state=42)
+            return pd.DataFrame() 
             
-        elif fonte_dados == "Amostra Sistemática":
-            k_p = total_p // n_amostra
-            start_p = random.randint(1, k_p)
-            q_p = f"SELECT * FROM public.ed_enem_2024_participantes WHERE CAST(nu_inscricao AS BIGINT) % {k_p} = {start_p} LIMIT {n_amostra}"
-            
-            k_r = total_r // n_amostra
-            start_r = random.randint(1, k_r)
-            q_r = f"SELECT * FROM public.ed_enem_2024_resultados WHERE CAST(nu_sequencial AS BIGINT) % {k_r} = {start_r} LIMIT {n_amostra}"
-            
-        elif fonte_dados == "Amostra Estratificada":
-            q_p = f"""
-                WITH amostra_bruta AS (
-                    SELECT * FROM public.ed_enem_2024_participantes TABLESAMPLE SYSTEM(10)
-                ),
-                pop_counts AS (
-                    SELECT regiao_nome_prova, COUNT(*) as total_estrato
-                    FROM amostra_bruta WHERE regiao_nome_prova IS NOT NULL GROUP BY regiao_nome_prova
-                ),
-                ranked AS (
-                    SELECT p.*, ROW_NUMBER() OVER(PARTITION BY p.regiao_nome_prova) as rn, c.total_estrato
-                    FROM amostra_bruta p JOIN pop_counts c ON p.regiao_nome_prova = c.regiao_nome_prova
-                    WHERE p.regiao_nome_prova IS NOT NULL
-                )
-                SELECT * FROM ranked WHERE rn <= ROUND({n_amostra} * (total_estrato::numeric / (SELECT COUNT(*) FROM amostra_bruta)))
-            """
-            q_r = f"SELECT * FROM public.ed_enem_2024_resultados TABLESAMPLE SYSTEM(5) LIMIT {n_amostra}"
+        df_estratificado_p = df_p_base.groupby('regiao_nome_prova', group_keys=False).apply(amostrar_estrato)
+        
+        df_aleatorio_r = df_r_base.sample(n=tamanho, random_state=42)
+        
+        return df_estratificado_p, df_aleatorio_r
 
-        with engine.connect() as conn:
-            df_p = pd.read_sql(text(q_p), conn)
-            df_r = pd.read_sql(text(q_r), conn)
-            
-            st.session_state.cache_amostras[fonte_dados] = {'participantes': df_p, 'resultados': df_r}
-
-if "População" not in fonte_dados:
-    st.session_state.df_participantes_amostra = st.session_state.cache_amostras[fonte_dados]['participantes']
-    st.session_state.df_resultados_amostra = st.session_state.cache_amostras[fonte_dados]['resultados']
-    st.session_state.last_extracted_fonte = fonte_dados
+df_ativo_p, df_ativo_r = gerar_amostra(df_completo_p, df_completo_r, fonte_dados, n_amostra)
 
 st.title(f"📊 Indicadores Principais - {fonte_dados}")
 
-
-@st.cache_data(show_spinner="Buscando opções...")
+@st.cache_data(show_spinner=False)
 def get_filter_options():
-    with engine.connect() as conn:
-        racas = pd.read_sql(text("SELECT DISTINCT tp_cor_raca FROM public.ed_enem_2024_participantes WHERE tp_cor_raca IS NOT NULL AND tp_cor_raca NOT ILIKE '%issing%'"), conn)["tp_cor_raca"].tolist()
-        regioes = pd.read_sql(text("SELECT DISTINCT regiao_nome_prova FROM public.ed_enem_2024_participantes WHERE regiao_nome_prova IS NOT NULL AND regiao_nome_prova NOT ILIKE '%issing%'"), conn)["regiao_nome_prova"].tolist()
-        banheiros = pd.read_sql(text("SELECT DISTINCT q009 FROM public.ed_enem_2024_participantes WHERE q009 IS NOT NULL AND q009 NOT ILIKE '%issing%'"), conn)["q009"].tolist()
+    racas = sorted([x for x in df_completo_p['tp_cor_raca'].dropna().unique() if str(x).lower() != 'nan'])
+    regioes = sorted([x for x in df_completo_p['regiao_nome_prova'].dropna().unique() if str(x).lower() != 'nan'])
+    banheiros = sorted([x for x in df_completo_p['q009'].dropna().unique() if str(x).lower() != 'nan'])
     return racas, regioes, banheiros
 
-@st.cache_data(show_spinner=False)
-def get_nacionalidade_data(fonte):
-    if "População" in fonte:
-        query = "SELECT tp_nacionalidade, COUNT(*) AS frequencia FROM public.ed_enem_2024_participantes GROUP BY tp_nacionalidade;"
-        with engine.connect() as conn:
-            return pd.read_sql(text(query), conn)
-    else:
-        df = st.session_state.df_participantes_amostra
-        return df.groupby('tp_nacionalidade').size().reset_index(name='frequencia')
+def aplicar_filtros(df, racas=(), regioes=(), banheiros=()):
+    mask = pd.Series(True, index=df.index)
+    if racas:
+        mask &= df['tp_cor_raca'].isin(racas)
+    if regioes:
+        mask &= df['regiao_nome_prova'].isin(regioes)
+    if banheiros:
+        mask &= df['q009'].isin(banheiros)
+    return df[mask]
 
-@st.cache_data(show_spinner=False)
-def get_dashboard_data(column_name, racas_selecionadas=(), regioes_selecionadas=(), banheiros_selecionados=(), fonte="População"):
-    if "População" in fonte:
-        where_clauses = ["1=1"]
-        where_clauses.append(f"CAST({column_name} AS TEXT) NOT ILIKE '%issing%'")
-        
-        if racas_selecionadas: 
-            racas_str = "', '".join(racas_selecionadas)
-            where_clauses.append(f"tp_cor_raca IN ('{racas_str}')")
-            
-        if regioes_selecionadas: 
-            regioes_str = "', '".join(regioes_selecionadas)
-            where_clauses.append(f"regiao_nome_prova IN ('{regioes_str}')")
-            
-        if banheiros_selecionados: 
-            banheiros_str = "', '".join(banheiros_selecionados)
-            where_clauses.append(f"q009 IN ('{banheiros_str}')")
-            
-        query = f"SELECT {column_name} AS categoria, COUNT(*) AS frequencia FROM public.ed_enem_2024_participantes WHERE {column_name} IS NOT NULL AND {' AND '.join(where_clauses)} GROUP BY {column_name};"
-        with engine.connect() as conn:
-            df = pd.read_sql(text(query), conn)
-        if not df.empty: df["percentual"] = df["frequencia"] * 100.0 / df["frequencia"].sum()
-        return df
-    else:
-        df = st.session_state.df_participantes_amostra
-        df = df[~df[column_name].astype(str).str.contains('issing', case=False, na=False)]
-        if racas_selecionadas: df = df[df['tp_cor_raca'].isin(racas_selecionadas)]
-        if regioes_selecionadas: df = df[df['regiao_nome_prova'].isin(regioes_selecionadas)]
-        if banheiros_selecionados: df = df[df['q009'].isin(banheiros_selecionados)]
-        res = df.groupby(column_name).size().reset_index(name='frequencia')
-        res.rename(columns={column_name: 'categoria'}, inplace=True)
-        res['percentual'] = res['frequencia'] * 100.0 / res['frequencia'].sum() if res['frequencia'].sum() > 0 else 0
-        return res
+def get_dashboard_data(df_entrada, column_name, racas_selecionadas=(), regioes_selecionadas=(), banheiros_selecionados=()):
+    df_filtrado = aplicar_filtros(df_entrada, racas_selecionadas, regioes_selecionadas, banheiros_selecionados)
+    df_limpo = df_filtrado.dropna(subset=[column_name])
+    
+    res = df_limpo[column_name].value_counts().reset_index()
+    res.columns = ['categoria', 'frequencia']
+    
+    total = res['frequencia'].sum()
+    res['percentual'] = (res['frequencia'] * 100.0 / total) if total > 0 else 0
+    return res
 
-@st.cache_data(show_spinner=False)
-def get_bens_consolidados(racas_selecionadas=(), regioes_selecionadas=(), fonte="População"):
-    if "População" in fonte:
-        where_clauses = ["1=1"]
-        
-        if racas_selecionadas: 
-            racas_str = "', '".join(racas_selecionadas)
-            where_clauses.append(f"tp_cor_raca IN ('{racas_str}')")
-            
-        if regioes_selecionadas: 
-            regioes_str = "', '".join(regioes_selecionadas)
-            where_clauses.append(f"regiao_nome_prova IN ('{regioes_str}')")
-            
-        query = f"""
-            SELECT COUNT(*) as total,
-            SUM(CASE WHEN q016 = 'Sim' THEN 1 ELSE 0 END) as micro_sim, SUM(CASE WHEN q016 = 'Não' THEN 1 ELSE 0 END) as micro_nao,
-            SUM(CASE WHEN q020 = 'Sim' THEN 1 ELSE 0 END) as wifi_sim, SUM(CASE WHEN q020 = 'Não' THEN 1 ELSE 0 END) as wifi_nao,
-            SUM(CASE WHEN q022 = 'Não' THEN 1 ELSE 0 END) as cel_nao, SUM(CASE WHEN q022 = 'Sim, um' THEN 1 ELSE 0 END) as cel_1,
-            SUM(CASE WHEN q022 = 'Sim, dois' THEN 1 ELSE 0 END) as cel_2, SUM(CASE WHEN q022 = 'Sim, três' THEN 1 ELSE 0 END) as cel_3,
-            SUM(CASE WHEN q022 = 'Sim, quatro ou mais' THEN 1 ELSE 0 END) as cel_4, SUM(CASE WHEN q021 = 'Não' THEN 1 ELSE 0 END) as pc_nao,
-            SUM(CASE WHEN q021 = 'Sim, um' THEN 1 ELSE 0 END) as pc_1, SUM(CASE WHEN q021 = 'Sim, dois' THEN 1 ELSE 0 END) as pc_2,
-            SUM(CASE WHEN q021 = 'Sim, três' THEN 1 ELSE 0 END) as pc_3, SUM(CASE WHEN q021 = 'Sim, quatro ou mais' THEN 1 ELSE 0 END) as pc_4
-            FROM public.ed_enem_2024_participantes WHERE {' AND '.join(where_clauses)};
-        """
-        with engine.connect() as conn:
-            return pd.read_sql(text(query), conn)
-    else:
-        df = st.session_state.df_participantes_amostra
-        if racas_selecionadas: df = df[df['tp_cor_raca'].isin(racas_selecionadas)]
-        if regioes_selecionadas: df = df[df['regiao_nome_prova'].isin(regioes_selecionadas)]
-        return pd.DataFrame([{
-            'total': len(df),
-            'micro_sim': (df['q016'] == 'Sim').sum(), 'micro_nao': (df['q016'] == 'Não').sum(),
-            'wifi_sim': (df['q020'] == 'Sim').sum(), 'wifi_nao': (df['q020'] == 'Não').sum(),
-            'cel_nao': (df['q022'] == 'Não').sum(), 'cel_1': (df['q022'] == 'Sim, um').sum(),
-            'cel_2': (df['q022'] == 'Sim, dois').sum(), 'cel_3': (df['q022'] == 'Sim, três').sum(),
-            'cel_4': (df['q022'] == 'Sim, quatro ou mais').sum(), 'pc_nao': (df['q021'] == 'Não').sum(),
-            'pc_1': (df['q021'] == 'Sim, um').sum(), 'pc_2': (df['q021'] == 'Sim, dois').sum(),
-            'pc_3': (df['q021'] == 'Sim, três').sum(), 'pc_4': (df['q021'] == 'Sim, quatro ou mais').sum()
-        }])
+def get_bens_consolidados(df_entrada, racas_selecionadas=(), regioes_selecionadas=()):
+    df = aplicar_filtros(df_entrada, racas_selecionadas, regioes_selecionadas)
+    
+    return pd.DataFrame([{
+        'total': len(df),
+        'micro_sim': (df['q016'] == 'Sim').sum(), 'micro_nao': (df['q016'] == 'Não').sum(),
+        'wifi_sim': (df['q020'] == 'Sim').sum(), 'wifi_nao': (df['q020'] == 'Não').sum(),
+        'cel_nao': (df['q022'] == 'Não').sum(), 'cel_1': (df['q022'] == 'Sim, um').sum(),
+        'cel_2': (df['q022'] == 'Sim, dois').sum(), 'cel_3': (df['q022'] == 'Sim, três').sum(),
+        'cel_4': (df['q022'] == 'Sim, quatro ou mais').sum(), 'pc_nao': (df['q021'] == 'Não').sum(),
+        'pc_1': (df['q021'] == 'Sim, um').sum(), 'pc_2': (df['q021'] == 'Sim, dois').sum(),
+        'pc_3': (df['q021'] == 'Sim, três').sum(), 'pc_4': (df['q021'] == 'Sim, quatro ou mais').sum()
+    }])
 
-@st.cache_data(show_spinner=False)
-def get_escolaridade_pais(racas_selecionadas=(), regioes_selecionadas=(), fonte="População"):
-    if "População" in fonte:
-        where_clauses = ["1=1"]
-        
-        if racas_selecionadas: 
-            racas_str = "', '".join(racas_selecionadas)
-            where_clauses.append(f"tp_cor_raca IN ('{racas_str}')")
-            
-        if regioes_selecionadas: 
-            regioes_str = "', '".join(regioes_selecionadas)
-            where_clauses.append(f"regiao_nome_prova IN ('{regioes_str}')")
-            
-        query = f"""
-            SELECT 'pai' AS responsavel, q001 AS categoria, COUNT(*) AS frequencia FROM public.ed_enem_2024_participantes WHERE q001 IS NOT NULL AND CAST(q001 AS TEXT) NOT ILIKE '%issing%' AND {' AND '.join(where_clauses)} GROUP BY q001
-            UNION ALL
-            SELECT 'mae' AS responsavel, q002 AS categoria, COUNT(*) AS frequencia FROM public.ed_enem_2024_participantes WHERE q002 IS NOT NULL AND CAST(q002 AS TEXT) NOT ILIKE '%issing%' AND {' AND '.join(where_clauses)} GROUP BY q002;
-        """
-        with engine.connect() as conn: return pd.read_sql(text(query), conn)
-    else:
-        df = st.session_state.df_participantes_amostra
-        if racas_selecionadas: df = df[df['tp_cor_raca'].isin(racas_selecionadas)]
-        if regioes_selecionadas: df = df[df['regiao_nome_prova'].isin(regioes_selecionadas)]
-        pai = df.groupby('q001').size().reset_index(name='frequencia').rename(columns={'q001': 'categoria'})
-        pai['responsavel'] = 'pai'
-        mae = df.groupby('q002').size().reset_index(name='frequencia').rename(columns={'q002': 'categoria'})
-        mae['responsavel'] = 'mae'
-        res = pd.concat([pai, mae], ignore_index=True)
-        return res[~res['categoria'].astype(str).str.contains('issing', case=False, na=False)]
-
-@st.cache_data(show_spinner=False)
-def get_amostra_notas(fonte="População"):
-    if "População" in fonte:
-        query = """SELECT nota_cn_ciencias_da_natureza AS "C. da Natureza", nota_ch_ciencias_humanas AS "Ciências Humanas", nota_lc_linguagens_e_codigos AS "Linguagens", nota_mt_matematica AS "Matemática", nota_redacao AS "Redação", nota_media_5_notas AS "Média Geral" FROM public.ed_enem_2024_resultados LIMIT 30000;"""
-        with engine.connect() as conn: return pd.read_sql(text(query), conn)
-    else:
-        df = st.session_state.df_resultados_amostra
-        res = df[['nota_cn_ciencias_da_natureza', 'nota_ch_ciencias_humanas', 'nota_lc_linguagens_e_codigos', 'nota_mt_matematica', 'nota_redacao', 'nota_media_5_notas']].copy()
-        res.columns = ["C. da Natureza", "Ciências Humanas", "Linguagens", "Matemática", "Redação", "Média Geral"]
-        return res
+def get_escolaridade_pais(df_entrada, racas_selecionadas=(), regioes_selecionadas=()):
+    df = aplicar_filtros(df_entrada, racas_selecionadas, regioes_selecionadas)
+    
+    pai = df['q001'].dropna().value_counts().reset_index()
+    pai.columns = ['categoria', 'frequencia']
+    pai['responsavel'] = 'pai'
+    
+    mae = df['q002'].dropna().value_counts().reset_index()
+    mae.columns = ['categoria', 'frequencia']
+    mae['responsavel'] = 'mae'
+    
+    return pd.concat([pai, mae], ignore_index=True)
 
 def format_kpi_value(val):
     if val == 0: return "0%"
@@ -256,13 +162,12 @@ racas_opcoes, regioes_opcoes, banheiros_opcoes = get_filter_options()
 
 with tab1:
     st.subheader("Indicadores de Nacionalidade")
-    df_nac = get_nacionalidade_data(fonte_dados)
+    df_nac = get_dashboard_data(df_ativo_p, "tp_nacionalidade")
+    
     if not df_nac.empty:
-        total_nac = df_nac["frequencia"].sum()
-        df_nac["percentual"] = df_nac["frequencia"] * 100.0 / total_nac
-        estrangeiro = get_percentage(df_nac, "tp_nacionalidade", "Estrangeiro(a)")
-        nao_inf = get_percentage(df_nac, "tp_nacionalidade", "Não informado")
-        outros = df_nac[~df_nac["tp_nacionalidade"].isin(["Estrangeiro(a)", "Não informado"])]["percentual"].sum()
+        estrangeiro = get_percentage(df_nac, "categoria", "Estrangeiro(a)")
+        nao_inf = get_percentage(df_nac, "categoria", "Não informado")
+        outros = df_nac[~df_nac["categoria"].isin(["Estrangeiro(a)", "Não informado"])]["percentual"].sum()
 
         col1, col2, col3 = st.columns(3)
         col1.metric("Estrangeiro(a)", f"{estrangeiro:.2f}%")
@@ -281,7 +186,7 @@ with tab2:
 
     with col_esquerda:
         st.markdown("<h6 style='color: #888;'>Frequência por cor e raça</h6>", unsafe_allow_html=True)
-        df_raca = get_dashboard_data("tp_cor_raca", (), tuple(f_regiao), (), fonte_dados)
+        df_raca = get_dashboard_data(df_ativo_p, "tp_cor_raca", regioes_selecionadas=tuple(f_regiao))
         if not df_raca.empty:
             fig_raca = px.pie(df_raca, values='frequencia', names='categoria', hole=0.6)
             fig_raca.update_traces(textposition='inside', textinfo='percent', rotation=90)
@@ -289,14 +194,14 @@ with tab2:
             st.plotly_chart(fig_raca, use_container_width=True)
 
         st.markdown("<h6 style='color: #888;'>Frequência por região</h6>", unsafe_allow_html=True)
-        df_regiao_dash = get_dashboard_data("regiao_nome_prova", tuple(f_raca), (), (), fonte_dados) 
+        df_regiao_dash = get_dashboard_data(df_ativo_p, "regiao_nome_prova", racas_selecionadas=tuple(f_raca)) 
         if not df_regiao_dash.empty:
             fig_regiao = px.treemap(df_regiao_dash, path=['categoria'], values='frequencia', color_continuous_scale='GnBu')
             fig_regiao.update_layout(margin=dict(t=10, b=10, l=10, r=10), coloraxis_showscale=False, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
             st.plotly_chart(fig_regiao, use_container_width=True)
 
     with col_direita:
-        df_bens = get_bens_consolidados(tuple(f_raca), tuple(f_regiao), fonte_dados)
+        df_bens = get_bens_consolidados(df_ativo_p, tuple(f_raca), tuple(f_regiao))
         if not df_bens.empty and df_bens['total'].iloc[0] > 0:
             row = df_bens.iloc[0]
             total = row['total']
@@ -339,7 +244,7 @@ with tab3:
     st.divider()
 
     st.markdown("<h6 style='color: #888; text-align: center;'>Frequência por cor e raça</h6>", unsafe_allow_html=True)
-    df_raca_t3 = get_dashboard_data("tp_cor_raca", (), tuple(f_regiao_t3), (), fonte_dados)
+    df_raca_t3 = get_dashboard_data(df_ativo_p, "tp_cor_raca", regioes_selecionadas=tuple(f_regiao_t3))
     if not df_raca_t3.empty:
         fig_raca_t3 = px.pie(df_raca_t3, values='frequencia', names='categoria', hole=0.6)
         fig_raca_t3.update_traces(textposition='inside', textinfo='percent', rotation=90)
@@ -347,7 +252,7 @@ with tab3:
         st.plotly_chart(fig_raca_t3, use_container_width=True)
 
     st.write("---")
-    df_escolaridade = get_escolaridade_pais(tuple(f_raca_t3), tuple(f_regiao_t3), fonte_dados)
+    df_escolaridade = get_escolaridade_pais(df_ativo_p, tuple(f_raca_t3), tuple(f_regiao_t3))
     col_pai, col_mae = st.columns(2, gap="large")
 
     with col_pai:
@@ -379,7 +284,7 @@ with tab4:
     st.divider()
 
     st.markdown("<h6 style='color: #888; text-align: center;'>Quantos banheiros em casa</h6>", unsafe_allow_html=True)
-    df_banheiros_dash = get_dashboard_data("q009", (), (), (), fonte_dados)
+    df_banheiros_dash = get_dashboard_data(df_ativo_p, "q009")
     if not df_banheiros_dash.empty:
         fig_banheiros = px.pie(df_banheiros_dash, values='frequencia', names='categoria', hole=0.6)
         fig_banheiros.update_traces(textposition='outside', textinfo='label+value+percent')
@@ -398,7 +303,7 @@ with tab4:
         "Acima de R$ 28.240,00"
     ]
 
-    df_renda = get_dashboard_data("q007", (), (), tuple(f_banheiros), fonte_dados)
+    df_renda = get_dashboard_data(df_ativo_p, "q007", banheiros_selecionados=tuple(f_banheiros))
     if not df_renda.empty:
         df_renda['categoria'] = pd.Categorical(df_renda['categoria'], categories=ordem_renda, ordered=True)
         df_renda = df_renda.sort_values(by='categoria')
@@ -422,9 +327,24 @@ with tab5:
     st.write("")
     st.markdown("##### Comparativo Geral de Notas")
     st.divider()
-    df_amostra = get_amostra_notas(fonte_dados)
-    if not df_amostra.empty:
-        df_melted = df_amostra.melt(var_name="Prova", value_name="Nota").dropna()
+    
+    colunas_notas = {
+        'nota_cn_ciencias_da_natureza': 'C. da Natureza',
+        'nota_ch_ciencias_humanas': 'Ciências Humanas',
+        'nota_lc_linguagens_e_codigos': 'Linguagens',
+        'nota_mt_matematica': 'Matemática',
+        'nota_redacao': 'Redação',
+        'nota_media_5_notas': 'Média Geral'
+    }
+    
+    df_plot = df_ativo_r.copy()
+    if len(df_plot) > 30000:
+        df_plot = df_plot.sample(n=30000, random_state=42)
+        
+    df_amostra_notas = df_plot[list(colunas_notas.keys())].rename(columns=colunas_notas)
+    
+    if not df_amostra_notas.empty:
+        df_melted = df_amostra_notas.melt(var_name="Prova", value_name="Nota").dropna()
         fig_violino = px.violin(df_melted, y="Nota", x="Prova", color="Prova", box=True, points=False)
         fig_violino.update_layout(showlegend=False, xaxis_title="", yaxis_title="Pontuação", margin=dict(t=30, b=30, l=10, r=10), height=600, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig_violino, use_container_width=True)
@@ -433,10 +353,15 @@ with tab6:
     st.write("")
     st.markdown("##### Teste de Normalidade Estatística")
     st.divider()
-    df_amostra = get_amostra_notas(fonte_dados)
-    if not df_amostra.empty:
-        df_teste = df_amostra[['Matemática', 'Linguagens']].dropna()
-        if len(df_teste) > 5000: df_teste = df_teste.sample(n=5000, random_state=42)
+    
+    if not df_ativo_r.empty:
+        df_teste = df_ativo_r[['nota_mt_matematica', 'nota_lc_linguagens_e_codigos']].rename(columns={
+            'nota_mt_matematica': 'Matemática', 
+            'nota_lc_linguagens_e_codigos': 'Linguagens'
+        }).dropna()
+        
+        if len(df_teste) > 5000: 
+            df_teste = df_teste.sample(n=5000, random_state=42)
 
         col_mt, col_lc = st.columns(2, gap="large")
         num_bins = 50
@@ -487,7 +412,7 @@ with tab7:
     st.divider()
     st.markdown("<h6 style='color: #888;'>Distribuição Demográfica - Faixa Etária</h6>", unsafe_allow_html=True)
     
-    df_idade = get_dashboard_data("tp_faixa_etaria", tuple(f_raca_t7), tuple(f_regiao_t7), tuple(f_banheiros_t7), fonte_dados)
+    df_idade = get_dashboard_data(df_ativo_p, "tp_faixa_etaria", tuple(f_raca_t7), tuple(f_regiao_t7), tuple(f_banheiros_t7))
     if not df_idade.empty:
         df_idade['categoria_str'] = df_idade['categoria'].astype(str).str.replace('.0', '', regex=False).str.strip()
         FAIXA_ETARIA_MAP = {
@@ -529,15 +454,15 @@ with tab8:
     if "População" in fonte_dados:
         st.info("Você está visualizando a População Total. Para usar a validação estatística, escolha um método de amostragem na Barra Lateral (Sidebar).")
     else:
-        st.write(f"Comparativo visual da distribuição de regiões entre a População Original ({st.session_state.total_participantes:,} alunos) e a sua **{fonte_dados}** ({n_amostra} alunos).".replace(',', '.'))
+        st.write(f"Comparativo visual da distribuição de regiões entre a População Original ({total_populacao_p:,} alunos) e a sua **{fonte_dados}** ({len(df_ativo_p)} alunos).".replace(',', '.'))
         
-        df_pop_reg = get_dashboard_data("regiao_nome_prova", fonte="População")
+        df_pop_reg = get_dashboard_data(df_completo_p, "regiao_nome_prova")
         total_pop_reg = df_pop_reg['frequencia'].sum()
         df_pop_plot = df_pop_reg[['categoria', 'frequencia']].copy()
         df_pop_plot['Tipo'] = 'Brasil (População Real)'
         df_pop_plot['%'] = (df_pop_plot['frequencia'] / total_pop_reg) * 100
 
-        df_amostra_reg = get_dashboard_data("regiao_nome_prova", fonte=fonte_dados)
+        df_amostra_reg = get_dashboard_data(df_ativo_p, "regiao_nome_prova")
         total_am_reg = df_amostra_reg['frequencia'].sum()
         df_amostra_plot = df_amostra_reg[['categoria', 'frequencia']].copy()
         df_amostra_plot['Tipo'] = 'Amostra Separada'
