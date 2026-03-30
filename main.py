@@ -16,7 +16,7 @@ FILE_R = "'dados_enem_resultados_pt*.parquet'"
 # =========================
 # CONFIGURAÇÃO DA BARRA LATERAL E AMOSTRAGEM
 # =========================
-st.sidebar.image("logo_enem.png", width=150)
+st.sidebar.image("logo_enem.png", width=450)
 st.sidebar.title("Configuração de Dados")
 st.sidebar.markdown("Altere a base de dados para recalcular todo o painel automaticamente.")
 
